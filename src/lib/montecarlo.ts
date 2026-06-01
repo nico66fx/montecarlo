@@ -1,23 +1,19 @@
-// Motor Monte Carlo de robustez.
+// Motor Monte Carlo de robustez de estrategia.
 //
-// Idea: a partir de la lista de resultados (P&L) de un backtest, se generan miles
-// de "vidas paralelas" reordenando o remuestreando las operaciones. Eso revela el
-// abanico real de resultados posibles (no solo la única curva "bonita" del backtest)
-// y permite estimar la probabilidad real de pasar un fondeo.
+// Idea: tu backtest es UNA sola realización de tu sistema. Reordenando (shuffle) o
+// remuestreando (bootstrap) tus operaciones miles de veces obtenemos el abanico real
+// de resultados posibles: cómo de ancho es el cono, qué retorno esperar de verdad y,
+// sobre todo, qué drawdown deberías esperar (el backtest casi siempre lo subestima).
 
 export type ResampleMethod = 'shuffle' | 'bootstrap';
-export type DDType = 'static' | 'trailing';
 
 export interface MCConfig {
   /** 'shuffle' = mismas operaciones en distinto orden · 'bootstrap' = remuestreo con reemplazo. */
   method: ResampleMethod;
   numSims: number;
   account: number;
-  /** Objetivo de beneficio (%) para considerar "fondeo pasado". */
-  target: number;
-  /** Drawdown máximo permitido (%). */
-  maxDD: number;
-  ddType: DDType;
+  /** Drawdown (%) que considerarías inaceptable → para el "riesgo de ruina". */
+  ruinThreshold: number;
   /** Ruido aleatorio por operación (% ±) para estresar aún más. 0 = desactivado. */
   noisePct: number;
 }
@@ -42,14 +38,17 @@ export interface MCResult {
   band: { p5: number[]; p50: number[]; p95: number[] };
   /** Curva real del backtest (referencia). */
   original: number[];
+  /** Retorno y drawdown del backtest original. */
+  originalReturn: number;
+  originalMaxDD: number;
+  /** Percentil donde cae el DD del backtest entre todas las simulaciones (0–100). */
+  originalDDPercentile: number;
   finalReturns: number[];
   maxDDs: number[];
-  /** % de simulaciones que alcanzan el objetivo sin romper el max DD. */
-  passRate: number;
   /** % de simulaciones que acaban en positivo. */
   profitableRate: number;
-  /** % de simulaciones que rompen el max DD en algún momento. */
-  breachRate: number;
+  /** % de simulaciones cuyo Max DD supera el umbral de ruina. */
+  ruinRate: number;
   ret: Percentiles;
   dd: Percentiles;
 }
@@ -91,21 +90,29 @@ function percentiles(arr: number[]): Percentiles {
   };
 }
 
+/** Max drawdown (peak-to-trough, %) de una secuencia de equity. */
+function maxDrawdown(path: ArrayLike<number>): number {
+  let peak = path[0];
+  let mdd = 0;
+  for (let i = 1; i < path.length; i++) {
+    if (path[i] > peak) peak = path[i];
+    const dd = peak > 0 ? ((peak - path[i]) / peak) * 100 : 0;
+    if (dd > mdd) mdd = dd;
+  }
+  return mdd;
+}
+
 export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
   const n = profits.length;
   const account = cfg.account;
   const sims = Math.max(1, Math.floor(cfg.numSims));
-  const targetEq = account * (1 + cfg.target / 100);
-  const maxAmt = (account * cfg.maxDD) / 100;
-  // Semilla determinista por config → resultados estables (mejor para capturas).
   const rand = mulberry32(0x9e3779b9 ^ (sims * 2654435761) ^ Math.round(account) ^ (cfg.method === 'shuffle' ? 1 : 2));
 
   const allPaths: Float32Array[] = new Array(sims);
   const finalReturns = new Array<number>(sims);
   const maxDDs = new Array<number>(sims);
-  let passed = 0,
-    profitable = 0,
-    breached = 0;
+  let profitable = 0,
+    ruin = 0;
 
   const seq = new Float64Array(n);
   for (let s = 0; s < sims; s++) {
@@ -124,9 +131,7 @@ export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
     const path = new Float32Array(n + 1);
     let eq = account;
     let peak = account;
-    let pathMaxDD = 0;
-    let didBreach = false;
-    let didPass = false;
+    let mdd = 0;
     path[0] = account;
     for (let i = 0; i < n; i++) {
       let p = seq[i];
@@ -134,20 +139,14 @@ export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
       eq += p;
       if (eq > peak) peak = eq;
       const dd = peak > 0 ? ((peak - eq) / peak) * 100 : 0;
-      if (dd > pathMaxDD) pathMaxDD = dd;
+      if (dd > mdd) mdd = dd;
       path[i + 1] = eq;
-      if (!didPass && !didBreach) {
-        const floor = cfg.ddType === 'trailing' ? peak - maxAmt : account - maxAmt;
-        if (eq <= floor) didBreach = true;
-        else if (eq >= targetEq) didPass = true;
-      }
     }
     allPaths[s] = path;
     finalReturns[s] = ((eq - account) / account) * 100;
-    maxDDs[s] = pathMaxDD;
-    if (didPass) passed++;
+    maxDDs[s] = mdd;
     if (eq > account) profitable++;
-    if (didBreach) breached++;
+    if (mdd >= cfg.ruinThreshold) ruin++;
   }
 
   // Bandas de percentiles por paso.
@@ -164,7 +163,7 @@ export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
     p95[st] = quantile(sorted, 0.95);
   }
 
-  // Curva real del backtest.
+  // Curva real del backtest + su DD/retorno.
   const original = new Array<number>(n + 1);
   let e = account;
   original[0] = account;
@@ -172,13 +171,17 @@ export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
     e += profits[i];
     original[i + 1] = e;
   }
+  const originalMaxDD = maxDrawdown(original);
+  const originalReturn = ((e - account) / account) * 100;
+  // ¿En qué percentil de DD cae el backtest? (bajo = tuvo un orden "suave"/afortunado)
+  let below = 0;
+  for (const d of maxDDs) if (d <= originalMaxDD) below++;
+  const originalDDPercentile = (below / sims) * 100;
 
-  // Submuestra de curvas para dibujar (máx. 300, suficiente para la "maraña").
+  // Submuestra de curvas para dibujar (máx. 300).
   const cap = Math.min(sims, 300);
   const renderPaths: number[][] = [];
-  for (let k = 0; k < cap; k++) {
-    renderPaths.push(Array.from(allPaths[Math.floor((k * sims) / cap)]));
-  }
+  for (let k = 0; k < cap; k++) renderPaths.push(Array.from(allPaths[Math.floor((k * sims) / cap)]));
 
   return {
     numTrades: n,
@@ -186,18 +189,20 @@ export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
     paths: renderPaths,
     band: { p5, p50, p95 },
     original,
+    originalReturn,
+    originalMaxDD,
+    originalDDPercentile,
     finalReturns,
     maxDDs,
-    passRate: (passed / sims) * 100,
     profitableRate: (profitable / sims) * 100,
-    breachRate: (breached / sims) * 100,
+    ruinRate: (ruin / sims) * 100,
     ret: percentiles(finalReturns),
     dd: percentiles(maxDDs),
   };
 }
 
 /** Histograma (conteo por bucket) de un array de valores. */
-export function histogram(values: number[], buckets = 30): { mid: number; lo: number; hi: number; count: number }[] {
+export function histogram(values: number[], buckets = 28): { mid: number; lo: number; hi: number; count: number }[] {
   if (!values.length) return [];
   let min = Infinity,
     max = -Infinity;
@@ -222,20 +227,29 @@ export function histogram(values: number[], buckets = 30): { mid: number; lo: nu
   return bins;
 }
 
-/** Veredicto de robustez a partir del % de fondeos pasados. */
-export function robustnessVerdict(passRate: number): { label: string; tone: 'pos' | 'brand' | 'neg' } {
-  if (passRate >= 75) return { label: 'Muy robusto', tone: 'pos' };
-  if (passRate >= 50) return { label: 'Robusto', tone: 'pos' };
-  if (passRate >= 30) return { label: 'Dudoso', tone: 'brand' };
-  return { label: 'Frágil / posible curve-fit', tone: 'neg' };
+/**
+ * Veredicto de robustez. Combina cuánto se infla el drawdown respecto al backtest y
+ * el % de escenarios rentables. Un sistema robusto: el backtest está cerca de la
+ * mediana, el cono es manejable y casi siempre gana.
+ */
+export function robustnessVerdict(r: MCResult): { label: string; tone: 'pos' | 'brand' | 'neg'; score: number } {
+  const inflation = r.originalMaxDD > 0 ? r.dd.p50 / r.originalMaxDD : 1; // DD típico vs backtest
+  const luck = r.originalDDPercentile; // bajo = el backtest fue "afortunado"
+  // score 0–100: penaliza pérdidas, DD inflado y backtest afortunado.
+  let score = r.profitableRate;
+  score -= Math.max(0, inflation - 1.2) * 40;
+  score -= Math.max(0, 15 - luck) * 1.5;
+  score = Math.max(0, Math.min(100, score));
+  if (score >= 75) return { label: 'Muy robusto', tone: 'pos', score };
+  if (score >= 55) return { label: 'Robusto', tone: 'pos', score };
+  if (score >= 35) return { label: 'Dudoso', tone: 'brand', score };
+  return { label: 'Frágil / posible curve-fit', tone: 'neg', score };
 }
 
 export const DEFAULT_MC: MCConfig = {
   method: 'shuffle',
   numSims: 1000,
   account: 10000,
-  target: 10,
-  maxDD: 6,
-  ddType: 'static',
+  ruinThreshold: 20,
   noisePct: 0,
 };

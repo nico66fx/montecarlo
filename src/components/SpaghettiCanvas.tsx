@@ -49,10 +49,8 @@ export function SpaghettiCanvas({ result, cfg, innerRef, height = 420 }: Props) 
         yMin = Math.min(yMin, v);
         yMax = Math.max(yMax, v);
       }
-      const floorStatic = result.account * (1 - cfg.maxDD / 100);
-      const targetEq = result.account * (1 + cfg.target / 100);
-      yMin = Math.min(yMin, floorStatic);
-      yMax = Math.max(yMax, targetEq);
+      const ruinEq = result.account * (1 - cfg.ruinThreshold / 100);
+      yMin = Math.min(yMin, ruinEq);
       const pad = (yMax - yMin) * 0.05 || 1;
       yMin -= pad;
       yMax += pad;
@@ -118,9 +116,8 @@ export function SpaghettiCanvas({ result, cfg, innerRef, height = 420 }: Props) 
         ctx.fillStyle = color;
         ctx.fillText(label, cssW - padR - 70, y(v) - 4);
       };
-      refLine(targetEq, 'rgba(52,211,153,0.8)', `Objetivo +${cfg.target}%`);
-      if (cfg.ddType === 'static') refLine(floorStatic, 'rgba(248,113,113,0.8)', `Suelo -${cfg.maxDD}%`);
       refLine(result.account, 'rgba(148,163,184,0.5)', 'Inicio');
+      refLine(ruinEq, 'rgba(248,113,113,0.7)', `-${cfg.ruinThreshold}%`);
 
       // Mediana (p50).
       ctx.setLineDash([]);

@@ -14,18 +14,11 @@ import { fmtNum, fmtPct } from './lib/format';
 import {
   DEFAULT_MC,
   robustnessVerdict,
-  type DDType,
   type MCConfig,
   type MCResult,
   type ResampleMethod,
 } from './lib/montecarlo';
 import type { MCRequest, MCResponse } from './lib/montecarlo.worker';
-
-const PRESETS: Record<string, { label: string; patch: Partial<MCConfig> }> = {
-  stellar1: { label: 'FundedNext Stellar 1-Step', patch: { target: 10, maxDD: 6, ddType: 'static' } },
-  ftmo: { label: 'FTMO', patch: { target: 10, maxDD: 10, ddType: 'static' } },
-  oneStepTrailing: { label: 'Genérico trailing', patch: { target: 10, maxDD: 6, ddType: 'trailing' } },
-};
 
 function useMCWorker() {
   const ref = useRef<Worker | null>(null);
@@ -67,18 +60,29 @@ function Landing({ onLoaded }: { onLoaded: (r: ParseResult) => void }) {
       <div className="mb-10 text-center">
         <div className="eyebrow mb-3 text-accent-400">Test de robustez · by nico66fx</div>
         <h1 className="text-4xl font-extrabold text-white sm:text-5xl">
-          Monte <span className="text-gradient">Carlo</span> de tu backtest
+          Monte <span className="text-gradient">Carlo</span> de tu estrategia
         </h1>
         <p className="mx-auto mt-4 max-w-2xl text-slate-400">
           Tu backtest es solo <strong className="text-slate-200">una</strong> de las miles de historias posibles.
-          Barajamos tus operaciones <strong className="text-slate-200">miles de veces</strong> y te enseñamos el
-          abanico real de resultados y la probabilidad de pasar un fondeo. Esto es lo que tu curva bonita no te cuenta.
+          Barajamos tus operaciones <strong className="text-slate-200">miles de veces</strong> para enseñarte el
+          abanico real de resultados y, sobre todo, el <strong className="text-slate-200">drawdown que de verdad
+          debes esperar</strong>. Esto es lo que tu curva bonita no te cuenta.
         </p>
       </div>
       <FileDrop onLoaded={onLoaded} />
       <div className="mt-12">
         <CommunityCTA />
       </div>
+    </div>
+  );
+}
+
+function DDNum({ label, value, tone }: { label: string; value: string; tone: 'white' | 'cyan' | 'red' }) {
+  const c = tone === 'white' ? 'text-white' : tone === 'cyan' ? 'text-accent-400' : 'text-neg';
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-wider text-slate-400">{label}</div>
+      <div className={`tnum mt-0.5 text-3xl font-extrabold sm:text-4xl ${c}`}>{value}</div>
     </div>
   );
 }
@@ -98,7 +102,7 @@ function Dashboard({ data, onReset }: { data: ParseResult; onReset: () => void }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profits, cfg]);
 
-  const verdict = result ? robustnessVerdict(result.passRate) : null;
+  const verdict = result ? robustnessVerdict(result) : null;
 
   const downloadImage = () => {
     const c = canvasRef.current;
@@ -109,82 +113,67 @@ function Dashboard({ data, onReset }: { data: ParseResult; onReset: () => void }
     a.click();
   };
 
+  const lucky = result && result.originalDDPercentile < 20;
+
   return (
     <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6">
       {/* Controles */}
       <Card>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="font-semibold text-brand-400">Configuración</h3>
-          <div className="flex flex-wrap gap-2">
-            {Object.entries(PRESETS).map(([k, p]) => (
-              <button
-                key={k}
-                onClick={() => setCfg((c) => ({ ...c, ...p.patch }))}
-                className="rounded-lg border border-white/10 bg-surface/50 px-2.5 py-1 text-xs font-semibold text-slate-300 transition hover:border-brand/50 hover:text-brand-400"
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-          <Field label="Método">
+        <h3 className="mb-3 font-semibold text-brand-400">Configuración</h3>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+          <Field label="Método" hint={cfg.method === 'shuffle' ? 'mismo set, otro orden' : 'con reemplazo'}>
             <select value={cfg.method} onChange={(e) => set('method', e.target.value as ResampleMethod)} className={inputClass}>
-              <option value="shuffle">Reordenar (mismo set)</option>
-              <option value="bootstrap">Remuestreo (con reemplazo)</option>
+              <option value="shuffle">Reordenar</option>
+              <option value="bootstrap">Remuestreo</option>
             </select>
           </Field>
-          <Field label="Nº de simulaciones">
+          <Field label="Nº simulaciones">
             <select value={cfg.numSims} onChange={(e) => set('numSims', +e.target.value)} className={inputClass}>
               {[500, 1000, 2000, 5000].map((n) => (
                 <option key={n} value={n}>{fmtNum(n, 0)}</option>
               ))}
             </select>
           </Field>
-          <Field label="Capital cuenta">
+          <Field label="Capital inicial">
             <input type="number" value={cfg.account} onChange={(e) => set('account', +e.target.value)} className={inputClass} />
           </Field>
-          <Field label="Objetivo beneficio (%)">
-            <input type="number" value={cfg.target} step={0.5} onChange={(e) => set('target', +e.target.value)} className={inputClass} />
+          <Field label="DD de ruina (%)" hint="DD que no tolerarías">
+            <input type="number" value={cfg.ruinThreshold} step={1} min={1} onChange={(e) => set('ruinThreshold', +e.target.value)} className={inputClass} />
           </Field>
-          <Field label="Max Drawdown (%)">
-            <input type="number" value={cfg.maxDD} step={0.5} onChange={(e) => set('maxDD', +e.target.value)} className={inputClass} />
-          </Field>
-          <Field label="Tipo de Max DD">
-            <select value={cfg.ddType} onChange={(e) => set('ddType', e.target.value as DDType)} className={inputClass}>
-              <option value="static">Estático</option>
-              <option value="trailing">Trailing</option>
-            </select>
-          </Field>
-          <Field label="Ruido por op. (± %)" hint="Estresa cada resultado">
+          <Field label="Ruido por op. (± %)" hint="0 = desactivado">
             <input type="number" value={cfg.noisePct} step={1} min={0} onChange={(e) => set('noisePct', +e.target.value)} className={inputClass} />
-          </Field>
-          <Field label="Operaciones">
-            <div className={`${inputClass} pointer-events-none opacity-80`}>{profits.length} ops</div>
           </Field>
         </div>
       </Card>
 
       {result && verdict && (
         <>
-          {/* Hero: probabilidad de pasar el fondeo */}
+          {/* Hero: reality check del drawdown */}
           <Card className="relative overflow-hidden">
             <div className="pointer-events-none absolute -right-10 -top-16 h-48 w-48 rounded-full bg-brand/20 blur-3xl" />
-            <div className="relative flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <div className="eyebrow text-accent-400">Probabilidad de pasar el fondeo</div>
-                <div className="mt-1 flex items-end gap-3">
-                  <span className={`glow-num text-6xl font-extrabold ${verdict.tone === 'neg' ? 'text-neg' : verdict.tone === 'brand' ? 'text-brand-400' : 'text-pos'}`}>
-                    {fmtPct(result.passRate, 0)}
-                  </span>
+            <div className="relative">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="eyebrow text-accent-400">El drawdown que deberías esperar</div>
+                <div className="flex items-center gap-2">
                   <Badge tone={verdict.tone}>{verdict.label}</Badge>
+                  <button onClick={downloadImage} className="btn-primary print:hidden text-sm">Descargar imagen</button>
                 </div>
-                <p className="mt-2 max-w-md text-sm text-slate-400">
-                  De {fmtNum(cfg.numSims, 0)} historias posibles, tu sistema alcanza el +{cfg.target}% sin reventar el
-                  {' '}-{cfg.maxDD}% en <strong className="text-slate-200">{fmtPct(result.passRate, 0)}</strong> de los casos.
-                </p>
               </div>
-              <button onClick={downloadImage} className="btn-primary print:hidden">Descargar imagen</button>
+              <div className="grid grid-cols-3 gap-4">
+                <DDNum label="Tu backtest" value={`-${fmtNum(result.originalMaxDD, 1)}%`} tone="white" />
+                <DDNum label="Típico (mediana)" value={`-${fmtNum(result.dd.p50, 1)}%`} tone="cyan" />
+                <DDNum label="Peor caso (5%)" value={`-${fmtNum(result.dd.p95, 1)}%`} tone="red" />
+              </div>
+              <p className="mt-3 max-w-3xl text-sm text-slate-400">
+                Tu backtest marcó <strong className="text-slate-200">-{fmtNum(result.originalMaxDD, 1)}%</strong> de
+                drawdown, pero {cfg.method === 'shuffle' ? 'reordenando' : 'remuestreando'} las mismas operaciones lo
+                normal es <strong className="text-accent-400">-{fmtNum(result.dd.p50, 1)}%</strong> y en el 5% de los
+                peores casos llegarías a <strong className="text-neg">-{fmtNum(result.dd.p95, 1)}%</strong>.
+                {lucky && (
+                  <> Además, tu backtest tuvo un orden <strong className="text-neg">afortunado</strong> (percentil
+                  {' '}{fmtNum(result.originalDDPercentile, 0)} de drawdown): no te fíes de esa curva tan suave.</>
+                )}
+              </p>
             </div>
           </Card>
 
@@ -200,17 +189,22 @@ function Dashboard({ data, onReset }: { data: ParseResult; onReset: () => void }
             </div>
             <SpaghettiCanvas result={result} cfg={cfg} innerRef={canvasRef} />
             <p className="mt-2 text-xs text-slate-500">
-              Cada hilo es una "vida paralela" de tu sistema. Si la curva blanca real va por el borde de arriba del abanico,
-              cuidado: tu backtest tuvo suerte con el orden de las operaciones.
+              Cada hilo es una "vida paralela" de tu sistema. Si la curva blanca real va pegada al borde de arriba del
+              abanico, tu backtest tuvo suerte con el orden de las operaciones.
             </p>
           </Card>
 
-          {/* Métricas */}
+          {/* Métricas de robustez */}
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-            <StatCard label="Acaba en positivo" value={fmtPct(result.profitableRate, 0)} tone="pos" hint="de las simulaciones" />
-            <StatCard label="Rompe el Max DD" value={fmtPct(result.breachRate, 0)} tone="neg" hint="en algún momento" />
-            <StatCard label="Retorno mediano" value={fmtPct(result.ret.p50, 1)} tone="brand" hint={`peor 5%: ${fmtPct(result.ret.p5, 1)}`} />
-            <StatCard label="Max DD mediano" value={fmtPct(result.dd.p50, 1)} tone="neg" hint={`peor 5%: ${fmtPct(result.dd.p95, 1)}`} />
+            <StatCard label="Índice de robustez" value={`${fmtNum(verdict.score, 0)}/100`} tone={verdict.tone === 'neg' ? 'neg' : verdict.tone === 'brand' ? 'brand' : 'pos'} hint={verdict.label} />
+            <StatCard label="Escenarios rentables" value={fmtPct(result.profitableRate, 0)} tone="pos" hint="acaban en verde" />
+            <StatCard
+              label="Retorno mediano"
+              value={fmtPct(result.ret.p50, 1)}
+              tone="brand"
+              hint={cfg.method === 'shuffle' ? 'fijo al reordenar' : `${fmtPct(result.ret.p5, 0)} … ${fmtPct(result.ret.p95, 0)}`}
+            />
+            <StatCard label={`Riesgo de ruina (DD>${cfg.ruinThreshold}%)`} value={fmtPct(result.ruinRate, 0)} tone="neg" hint="de las simulaciones" />
           </div>
 
           {/* Distribuciones */}
@@ -220,21 +214,30 @@ function Dashboard({ data, onReset }: { data: ParseResult; onReset: () => void }
                 <h3 className="font-semibold text-white">Distribución de retornos</h3>
                 <Badge tone="neutral">mediana {fmtPct(result.ret.p50, 1)}</Badge>
               </div>
-              <Histogram values={result.finalReturns} palette="sign" />
+              {cfg.method === 'shuffle' ? (
+                <div className="flex h-36 flex-col items-center justify-center text-center text-sm text-slate-400">
+                  <span className="tnum text-2xl font-bold text-pos">{fmtPct(result.ret.p50, 1)}</span>
+                  <span className="mt-1 max-w-xs text-xs text-slate-500">
+                    Al reordenar, el retorno total no cambia (es la misma suma). Lo que cambia es el camino y el drawdown. Usa "Remuestreo" para ver el abanico de retornos.
+                  </span>
+                </div>
+              ) : (
+                <Histogram values={result.finalReturns} palette="sign" />
+              )}
             </Card>
             <Card delay={60}>
               <div className="mb-3 flex items-center justify-between">
                 <h3 className="font-semibold text-white">Distribución de Max Drawdown</h3>
                 <Badge tone="neg">peor {fmtPct(result.dd.max, 1)}</Badge>
               </div>
-              <Histogram values={result.maxDDs} palette="dd" />
+              <Histogram values={result.maxDDs} palette="dd" unit="%" />
             </Card>
           </div>
 
           <p className="rounded-xl border border-white/10 bg-surface/40 px-4 py-3 text-xs text-slate-500">
-            ⚠️ Monte Carlo asume que tus operaciones son intercambiables y reordena/remuestrea su orden. No modela el
-            drawdown intradía exacto ni el daily loss (el orden es aleatorio). Es una aproximación de robustez, no una
-            garantía. Contenido educativo, no asesoramiento financiero.
+            ⚠️ Monte Carlo asume que tus operaciones son intercambiables y reordena/remuestrea su secuencia. Es una
+            aproximación de robustez (no modela cambios de régimen ni correlación temporal). Contenido educativo, no
+            asesoramiento financiero.
           </p>
 
           <div className="pt-2">
