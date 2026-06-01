@@ -93,16 +93,14 @@ function Dashboard({ data, onReset }: { data: ParseResult; onReset: () => void }
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const profits = useMemo(() => data.trades.map((t) => t.profit), [data]);
-  const lots = useMemo(() => data.trades.map((t) => t.lots), [data]);
-  const hasLots = useMemo(() => lots.some((l) => l > 0), [lots]);
   const set = <K extends keyof MCConfig>(k: K, v: MCConfig[K]) => setCfg((c) => ({ ...c, [k]: v }));
 
   useEffect(() => {
     if (profits.length === 0) return;
-    const id = setTimeout(() => run({ profits, lots, config: cfg }), 120);
+    const id = setTimeout(() => run({ profits, config: cfg }), 120);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profits, lots, cfg]);
+  }, [profits, cfg]);
 
   // ¿Varía el retorno entre simulaciones? (al reordenar sin estresores, no).
   const returnsVary = cfg.method === 'bootstrap' || cfg.slippage > 0 || cfg.dropPct > 0 || cfg.noisePct > 0;
@@ -148,26 +146,12 @@ function Dashboard({ data, onReset }: { data: ParseResult; onReset: () => void }
           <Field label="Ruido por op. (± %)" hint="0 = desactivado">
             <input type="number" value={cfg.noisePct} step={1} min={0} onChange={(e) => set('noisePct', +e.target.value)} className={inputClass} />
           </Field>
-        </div>
-
-        {/* Costes reales y randomizaciones */}
-        <div className="mt-4 rounded-xl border border-brand/20 bg-brand/[0.04] p-4">
-          <h4 className="mb-3 text-sm font-semibold text-brand-400">Costes reales y estrés</h4>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <Field label="Spread+comisión ($/lote)" hint={hasLots ? 'ida+vuelta, por cada lote' : '⚠️ tu archivo no trae lotaje'}>
-              <input type="number" value={cfg.costPerLot} step={1} min={0} onChange={(e) => set('costPerLot', +e.target.value)} className={inputClass} disabled={!hasLots} />
-            </Field>
-            <Field label="Slippage máx. ($/op)" hint="resta un aleatorio adverso">
-              <input type="number" value={cfg.slippage} step={1} min={0} onChange={(e) => set('slippage', +e.target.value)} className={inputClass} />
-            </Field>
-            <Field label="Señales perdidas (%)" hint="ops que no se ejecutan">
-              <input type="number" value={cfg.dropPct} step={1} min={0} max={90} onChange={(e) => set('dropPct', +e.target.value)} className={inputClass} />
-            </Field>
-          </div>
-          <p className="mt-2 text-[11px] text-slate-500">
-            Sube el coste y mira cómo se hunde el abanico: así de fácil se cae un bot bonito en backtest con condiciones
-            reales. Separa los sistemas con margen de verdad.
-          </p>
+          <Field label="Slippage máx. ($/op)" hint="resta un aleatorio adverso">
+            <input type="number" value={cfg.slippage} step={1} min={0} onChange={(e) => set('slippage', +e.target.value)} className={inputClass} />
+          </Field>
+          <Field label="Señales perdidas (%)" hint="ops que no se ejecutan">
+            <input type="number" value={cfg.dropPct} step={1} min={0} max={90} onChange={(e) => set('dropPct', +e.target.value)} className={inputClass} />
+          </Field>
         </div>
       </Card>
 
