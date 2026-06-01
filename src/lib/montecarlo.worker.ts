@@ -4,6 +4,7 @@ import { runMonteCarlo, type MCConfig, type MCResult } from './montecarlo';
 
 export interface MCRequest {
   profits: number[];
+  lots: number[];
   config: MCConfig;
 }
 export interface MCResponse {
@@ -11,7 +12,7 @@ export interface MCResponse {
 }
 
 self.onmessage = (e: MessageEvent<MCRequest>) => {
-  const { profits, config } = e.data;
-  const result = runMonteCarlo(profits, config);
+  const { profits, lots, config } = e.data;
+  const result = runMonteCarlo(profits, lots, config);
   (self as unknown as Worker).postMessage({ result } satisfies MCResponse);
 };

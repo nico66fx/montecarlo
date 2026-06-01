@@ -16,6 +16,12 @@ export interface MCConfig {
   ruinThreshold: number;
   /** Ruido aleatorio por operación (% ±) para estresar aún más. 0 = desactivado. */
   noisePct: number;
+  /** Coste extra por lote (spread+comisión, ida+vuelta, en divisa). Resta lots×coste a cada op. */
+  costPerLot: number;
+  /** Slippage máximo adverso por operación (en divisa). Resta un aleatorio 0..slippage. */
+  slippage: number;
+  /** % de operaciones que se "pierden" (señal fallada/VPS caído): cuentan como 0. */
+  dropPct: number;
 }
 
 export interface Percentiles {
@@ -102,11 +108,15 @@ function maxDrawdown(path: ArrayLike<number>): number {
   return mdd;
 }
 
-export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
+export function runMonteCarlo(profits: number[], lots: number[], cfg: MCConfig): MCResult {
   const n = profits.length;
   const account = cfg.account;
   const sims = Math.max(1, Math.floor(cfg.numSims));
   const rand = mulberry32(0x9e3779b9 ^ (sims * 2654435761) ^ Math.round(account) ^ (cfg.method === 'shuffle' ? 1 : 2));
+
+  // Coste determinista por lote (spread+comisión) aplicado a cada operación.
+  const base = new Float64Array(n);
+  for (let i = 0; i < n; i++) base[i] = profits[i] - (lots[i] || 0) * cfg.costPerLot;
 
   const allPaths: Float32Array[] = new Array(sims);
   const finalReturns = new Array<number>(sims);
@@ -117,9 +127,9 @@ export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
   const seq = new Float64Array(n);
   for (let s = 0; s < sims; s++) {
     if (cfg.method === 'bootstrap') {
-      for (let i = 0; i < n; i++) seq[i] = profits[(rand() * n) | 0];
+      for (let i = 0; i < n; i++) seq[i] = base[(rand() * n) | 0];
     } else {
-      for (let i = 0; i < n; i++) seq[i] = profits[i];
+      for (let i = 0; i < n; i++) seq[i] = base[i];
       for (let i = n - 1; i > 0; i--) {
         const j = (rand() * (i + 1)) | 0;
         const t = seq[i];
@@ -135,7 +145,12 @@ export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
     path[0] = account;
     for (let i = 0; i < n; i++) {
       let p = seq[i];
-      if (cfg.noisePct > 0) p *= 1 + (rand() * 2 - 1) * (cfg.noisePct / 100);
+      // Señal perdida (cuenta como 0).
+      if (cfg.dropPct > 0 && rand() * 100 < cfg.dropPct) p = 0;
+      else {
+        if (cfg.slippage > 0) p -= rand() * cfg.slippage;
+        if (cfg.noisePct > 0) p *= 1 + (rand() * 2 - 1) * (cfg.noisePct / 100);
+      }
       eq += p;
       if (eq > peak) peak = eq;
       const dd = peak > 0 ? ((peak - eq) / peak) * 100 : 0;
@@ -163,12 +178,12 @@ export function runMonteCarlo(profits: number[], cfg: MCConfig): MCResult {
     p95[st] = quantile(sorted, 0.95);
   }
 
-  // Curva real del backtest + su DD/retorno.
+  // Curva real del backtest (con el coste determinista aplicado) + su DD/retorno.
   const original = new Array<number>(n + 1);
   let e = account;
   original[0] = account;
   for (let i = 0; i < n; i++) {
-    e += profits[i];
+    e += base[i];
     original[i + 1] = e;
   }
   const originalMaxDD = maxDrawdown(original);
@@ -252,4 +267,7 @@ export const DEFAULT_MC: MCConfig = {
   account: 10000,
   ruinThreshold: 20,
   noisePct: 0,
+  costPerLot: 0,
+  slippage: 0,
+  dropPct: 0,
 };
